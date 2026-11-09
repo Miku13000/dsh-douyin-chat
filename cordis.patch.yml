@@ -1,0 +1,4 @@
+- insert:
+    - id: douyin-chat
+      name: dsh-douyin-chat
+      config: {}

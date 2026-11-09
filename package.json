@@ -1,0 +1,33 @@
+{
+  "name": "dsh-douyin-chat",
+  "version": "0.1.0",
+  "description": "抖音群聊聊天 —— DSH 插件：群聊/私信自动回话、表情包、随机分享（仅私聊）",
+  "type": "module",
+  "main": "index.js",
+  "license": "MIT",
+  "author": "Sora",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  },
+  "engines": {
+    "dsh": ">=0.2.0"
+  }
+}

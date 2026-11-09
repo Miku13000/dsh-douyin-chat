@@ -1,7 +1,7 @@
 ﻿/**
  * bin/service.mjs —— 抖音后台服务（对标 QQ 桥接的 3100）
  *
- * 设计原则（老大 2026-11-09 定）：**不操作电脑**。
+ * 设计原则（使用者 2026-11-09 定）：**不操作电脑**。
  * 所有动作都走进程内的无头浏览器（CDP），不弹窗、不抢焦点、不动鼠标键盘。
  *
  * 端口 3110，接口：
@@ -29,6 +29,7 @@ import { phase as trafficPhase, hourly as trafficHourly } from '../lib/traffic.m
 import { nextChange } from '../lib/valley.mjs'
 import { bump as bumpStat, today as statToday, recent as statRecent } from '../lib/stats.mjs'
 import { getPlan, quota, isPlanTime, nextRunAt, DEFAULT_PLAN } from '../lib/plan.mjs'
+import { check as guardCheck, mark as guardMark, jitterMs, status as guardStatus } from '../lib/guard.mjs'
 import { soulStatus, localPersona, localMemory, saveLocalPersona, saveLocalMemory, identityMode } from '../lib/soul.mjs'
 import { Browser, readCookieString } from '../lib/cdp.mjs'
 import { openChat, openConversation, readRecent } from '../lib/douyin.mjs'
@@ -407,6 +408,7 @@ const server = createServer(async (req, res) => {
         list: list.slice(0, 10),
         shared,
         quota: { ...quota(statToday()), nextRunAt: nextRunAt() },
+        guard: guardStatus(),
       })
     }
     if (p === '/plan') {
@@ -438,6 +440,9 @@ const server = createServer(async (req, res) => {
       if (prefsNow.share && prefsNow.share.allowGroups === true) {
         // 故意的：即便配置允许，这个接口只走私聊
       }
+      const sg = guardCheck('share')
+      if (!sg.ok) return json(res, 200, { ok: false, skipped: true, error: '先别发：' + sg.reason, guard: sg })
+      await new Promise((r2) => setTimeout(r2, jitterMs()))
       const rec = await runBin('bin/recommend.mjs', ['--top', '8'])
       const list = (rec && rec.list) || []
       if (!list.length) return json(res, 200, { ok: false, error: '没拉到候选视频' })
@@ -453,7 +458,7 @@ const server = createServer(async (req, res) => {
         }
         return last
       })
-      if (r && r.ok) { try { bumpStat('share') } catch { /* 忽略 */ } }
+      if (r && r.ok) { try { bumpStat('share'); guardMark('share') } catch { /* 忽略 */ } }
       return json(res, 200, {
         ok: Boolean(r && r.ok),
         to: target,
@@ -461,6 +466,75 @@ const server = createServer(async (req, res) => {
         error: (r && (r.error || r.reason)) || '',
         picked: { aweme_id: item.aweme_id, desc: String(item.desc || '').slice(0, 60), score: item.score },
         candidates: list.length,
+      })
+    }
+    if (p === '/comment/mention' && req.method === 'POST') {
+      const b = await body(req)
+      const aweme = String(b.aweme || '').trim()
+      const name = String(b.name || '').trim()
+      const text = String(b.text || '').trim()
+      if (!aweme || !name) return json(res, 400, { ok: false, error: '缺 aweme 或 name' })
+      if (b.dry !== true && b.confirm !== true) {
+        return json(res, 200, { ok: true, sent: false, needsConfirm: true, draft: '@' + name + ' ' + text })
+      }
+      if (b.dry !== true) {
+        const g = guardCheck('comment')
+        if (!g.ok) return json(res, 200, { ok: false, error: '先别发：' + g.reason, guard: g })
+        await new Promise((r2) => setTimeout(r2, jitterMs()))
+      }
+      const args = ['bin/comment-mention-bridge.mjs', '--aweme', aweme, '--name', name, '--text', text]
+      if (b.dry === true) args.push('--dry')
+      const r = await runBin(args[0], args.slice(1), { timeout: 300_000 })
+      if (r && r.ok) { try { bumpStat('comment'); guardMark('comment') } catch { /* 忽略 */ } }
+      return json(res, 200, r)
+    }    if (p === '/convos') {
+      const prefsNow = loadPrefs()
+      const dm = Array.isArray(prefsNow.dmPeers) ? prefsNow.dmPeers.slice() : []
+      const groups = Array.isArray(prefsNow.groupWhitelist) && prefsNow.groupWhitelist.length
+        ? prefsNow.groupWhitelist.slice()
+        : (Array.isArray(prefsNow.groups) ? prefsNow.groups.slice() : [])
+      const pending = Array.isArray(prefsNow.pendingGroups) ? prefsNow.pendingGroups.slice() : []
+
+      if (req.method === 'POST') {
+        const b = await body(req)
+        const name = String(b.name || '').trim()
+        const act = String(b.action || '')
+        if (!act) return json(res, 400, { ok: false, error: '缺 action' })
+        if (!name && act !== 'confirm') return json(res, 400, { ok: false, error: '缺 name' })
+
+        if (act === 'addDm') {
+          if (!dm.includes(name)) dm.push(name)
+          savePrefs({ dmPeers: dm })
+          if (watchDmChild) { stopWatchDm(); startWatchDm() }   // 让监听立刻带上新对象
+        } else if (act === 'removeDm') {
+          savePrefs({ dmPeers: dm.filter((x) => x !== name) })
+          if (watchDmChild) { stopWatchDm(); startWatchDm() }
+        } else if (act === 'requestGroup') {
+          if (!pending.includes(name) && !groups.some((g) => (typeof g === 'string' ? g : g && g.name) === name)) pending.push(name)
+          savePrefs({ pendingGroups: pending })
+        } else if (act === 'confirmGroup' || act === 'rejectGroup') {
+          const idx = pending.indexOf(name)
+          if (idx >= 0) pending.splice(idx, 1)
+          const nextGroups = act === 'confirmGroup'
+            ? (groups.some((g) => (typeof g === 'string' ? g : g && g.name) === name) ? groups : groups.concat([name]))
+            : groups
+          savePrefs({ pendingGroups: pending, groupWhitelist: nextGroups, groups: nextGroups })
+          if (act === 'confirmGroup' && watchChild) { stopWatch(); startWatch() }
+        } else if (act === 'removeGroup') {
+          const left = groups.filter((g) => (typeof g === 'string' ? g : g && g.name) !== name)
+          savePrefs({ groupWhitelist: left, groups: left })
+          if (watchChild) { stopWatch(); startWatch() }
+        } else {
+          return json(res, 400, { ok: false, error: '未知 action：' + act })
+        }
+      }
+
+      const after = loadPrefs()
+      return json(res, 200, {
+        ok: true,
+        dmPeers: after.dmPeers || [],
+        groups: after.groupWhitelist || after.groups || [],
+        pendingGroups: after.pendingGroups || [],
       })
     }
     if (p === '/memes') {
@@ -505,6 +579,18 @@ const server = createServer(async (req, res) => {
         if (b.mode && ['qq', 'local', 'both'].includes(b.mode)) {
           savePrefs({ identity: { ...(loadPrefs().identity || {}), mode: b.mode } })
         }
+        if (b.owner && typeof b.owner === 'object') {
+          const cur = loadPrefs().owner || {}
+          savePrefs({
+            owner: {
+              ...cur,
+              ...(typeof b.owner.nick === 'string' ? { nick: b.owner.nick.trim() } : {}),
+              ...(typeof b.owner.douyinId === 'string' ? { douyinId: b.owner.douyinId.trim() } : {}),
+              ...(typeof b.owner.qq === 'string' ? { qq: b.owner.qq.trim() } : {}),
+              ...(typeof b.owner.alias === 'string' ? { alias: b.owner.alias.trim() } : {}),
+            },
+          })
+        }
         if (typeof b.persona === 'string') saveLocalPersona(b.persona)
         if (b.videoPrefs && typeof b.videoPrefs === 'object') {
           const cur = loadPrefs().videoPrefs || {}
@@ -525,6 +611,7 @@ const server = createServer(async (req, res) => {
       return json(res, 200, {
         ok: true,
         mode: identityMode(),
+        owner: loadPrefs().owner || {},
         videoPrefs: loadPrefs().videoPrefs || {},
         qq: soulStatus(),
         local: { persona: localPersona(), memory: localMemory() },
@@ -572,6 +659,7 @@ const server = createServer(async (req, res) => {
     if (p === '/status') {
       const prefs = loadPrefs()
       return json(res, 200, {
+        guard: guardStatus(),
         ok: true,
         account: prefs.account || null,
         participation: prefs.participation,

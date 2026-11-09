@@ -33,7 +33,7 @@ if (!to) { emit({ ok: false, error: '没有分享对象：给 --to，或在 pref
 
 const mode = arg('--mode', cfg.mode || 'card')
 
-// 群分享先关掉（老大 2026-11-09：私聊留着，群聊暂时删除）
+// 群分享先关掉（使用者 2026-11-09：私聊留着，群聊暂时删除）
 const groupNames = (prefs.groupWhitelist || []).map((g) => (typeof g === 'string' ? g : g?.name)).filter(Boolean)
 const isGroup = groupNames.includes(to)
 if (isGroup && cfg.allowGroups !== true && !flag('--allow-group')) {

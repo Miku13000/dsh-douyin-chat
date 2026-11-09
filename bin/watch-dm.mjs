@@ -8,7 +8,7 @@
  *   · 只回**对方发来的新消息**，自己发的不理
  *   · 每条消息只回一次（靠 anchor 去重）
  *   · 同一人两次回复之间隔 replyGapSec（默认 3 秒，私信可以快一点）
- *   · 私信里可以叫「宝宝」，群里不行（reply.mjs 的 kind 管着）
+ *   · 私信里可以叫「昵称」，群里不行（reply.mjs 的 kind 管着）
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -27,7 +27,7 @@ const STATE = join(PATHS.home, 'watch-dm-state.json')
 const LOG = join(PATHS.home, 'watch-dm.log')
 
 const prefs = loadPrefs()
-const SELF = selfNick() || '小鲸鱼deepseek'
+const SELF = selfNick() || process.env.FISH_SELF_NICK || '小鲸鱼'
 
 /** 自己最近发过的话（私信 DOM 里「我/对方」的类名不可靠，用文本比对兜底） */
 const SENT_KEEP = 30
@@ -101,6 +101,39 @@ async function main() {
           st.anchor = newest
           saveState(state)
           if (!incoming.length) { log(`[${peer}] 无新的对方消息`); continue }
+
+            // ⭐ 记住对方最近发来的视频 id（后面说「评论区 @ 我」时用它当目标）
+            for (const m of incoming) {
+              const t = String(m.text || '')
+              const idHit = t.match(/(?:video\/|\/share\/video\/|modal_id=)(\d{15,25})/)
+              if (idHit) { state.lastVideo = idHit[1]; saveState(state); log(`[${peer}] 记下视频 ${idHit[1]}`) }
+            }
+
+            // ⭐「评论区 @ 我」指令：真的去评论（限速由服务端管）
+            const askComment = incoming.find((m) => /评论区/.test(String(m.text || '')) && /@|艾特/.test(String(m.text || '')))
+            if (askComment) {
+              const vid = state.lastVideo || ''
+              if (!vid) {
+                const t2 = '想让我去评论区@你，得先发一条视频给我（转给我，或者贴个链接）'
+                if (!DRY) { const s2 = await sendInPlace(b, { text: t2 }); if (s2.ok) { rememberSent(state, t2); saveState(state) } }
+                log(`[${peer}] 要求评论但没有目标视频，已提示`)
+                continue
+              }
+              try {
+                const resp = await fetch('http://127.0.0.1:3110/comment/mention', {
+                  method: 'POST',
+                  headers: { 'content-type': 'application/json' },
+                  body: JSON.stringify({ aweme: vid, name: 'Sora', text: '来啦，看到你说的了', confirm: true }),
+                })
+                const jr = await resp.json()
+                const msg = jr && jr.ok ? '评论发好了，你去看看有没有@到你' : ('想发但没发出去：' + ((jr && jr.error) || '未知原因'))
+                log(`[${peer}] 评论指令结果：${msg}`)
+                if (!DRY) { const s3 = await sendInPlace(b, { text: msg }); if (s3.ok) { rememberSent(state, msg); saveState(state) } }
+              } catch (e) {
+                log(`[${peer}] 评论指令失败：${String(e?.message ?? e)}`)
+              }
+              continue
+            }
 
           const last = incoming[incoming.length - 1]
           const draft = await draftReply({ who: last.who, text: last.text, context: msgs.slice(-6), kind: 'dm' })

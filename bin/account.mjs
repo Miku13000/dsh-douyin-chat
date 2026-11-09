@@ -2,8 +2,8 @@
  * bin/account.mjs —— 管「用哪个抖音号」。
  *
  *   node bin/account.mjs list                 # 看有哪些账号 + 当前用哪个
- *   node bin/account.mjs add --id Chisa_Eidt --nick 小鲸鱼deepseek --cookie <文件>
- *   node bin/account.mjs use --id Chisa_Eidt  # 切过去（--nick 也行）
+ *   node bin/account.mjs add --id <抖音号> --nick <昵称> --cookie <cookie文件>
+ *   node bin/account.mjs use --id <抖音号>  # 切过去（--nick 也行）
  *   node bin/account.mjs show                 # 当前用哪个、cookie 从哪来
  */
 import { existsSync } from 'node:fs'

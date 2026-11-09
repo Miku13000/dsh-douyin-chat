@@ -72,11 +72,15 @@ window.__ModuleLoader__.load({
     // 会话消息缓存：切走再切回来不重新转圈；刷新在后台做
     const chatCache = new Map()   // target -> messages
 
-    function ChatPane({ target, kind }) {
+    function ChatPane({ target, kind, onConvoChanged }) {
       const [msgs, setMsgs] = useState(() => chatCache.get(target) || [])
       const [slow, setSlow] = useState(false)
       const [tags, setTags] = useState([])
       const [showTags, setShowTags] = useState(false)
+      const [convos, setConvos] = useState(null)
+      const [showManage, setShowManage] = useState(false)
+      const [newDm, setNewDm] = useState('')
+      const [newGroup, setNewGroup] = useState('')
       const [text, setText] = useState('')
       const [busy, setBusy] = useState('')
       const [err, setErr] = useState('')
@@ -104,6 +108,22 @@ window.__ModuleLoader__.load({
       useEffect(() => {
         call('/memes').then((r) => setTags((r && r.tags) || [])).catch(() => { /* 图库读不到就不显示分类 */ })
       }, [])
+
+      const loadConvos = useCallback(async () => {
+        try { setConvos(await call('/convos')) } catch { /* 读不到就不显示管理区 */ }
+      }, [])
+      useEffect(() => { loadConvos() }, [loadConvos])
+
+      const convoAction = useCallback(async (action, name) => {
+        try {
+          const r = await post('/convos', { action, name })
+          setConvos(r)
+          if (action === 'addDm') setNewDm('')
+          if (action === 'requestGroup') setNewGroup('')
+          setErr('')
+          if (typeof onConvoChanged === 'function') onConvoChanged()
+        } catch (e) { setErr(String(e && e.message || e)) }
+      }, [onConvoChanged])
 
       const sendTag = useCallback(async (tag) => {
         if (!target) return
@@ -137,8 +157,55 @@ window.__ModuleLoader__.load({
           h('div', { style: { fontWeight: 600 } }, target),
           h('div', { style: s.muted }, kind === 'group' ? '群聊' : '私信'),
           h('div', { style: { flex: 1 } }),
+          h('button', { style: s.btn, onClick: () => { setShowManage(!showManage); loadConvos() } }, showManage ? '收起管理' : '管理会话'),
           h('button', { style: s.btn, disabled: busy === 'load', onClick: () => load(false) }, '刷新')
         ),
+        showManage
+          ? h('div', {
+            style: {
+              padding: '8px 10px', borderRadius: 10, fontSize: 12, lineHeight: 1.9,
+              border: '1px solid var(--dsh-border, rgba(128,128,128,.35))',
+            },
+          },
+            h('div', { style: { fontWeight: 600 } }, '私聊（可以直接加）'),
+            h('div', { style: s.row },
+              h('input', { style: s.input, value: newDm, placeholder: '对方昵称（要和抖音上一致）', onChange: (e) => setNewDm(e.target.value) }),
+              h('button', { style: s.btn, disabled: !newDm.trim(), onClick: () => convoAction('addDm', newDm.trim()) }, '添加')
+            ),
+            h('div', { style: { opacity: 0.75 } },
+              ((convos && convos.dmPeers) || []).map((d) => h('div', { key: 'dm' + d, style: { display: 'flex', justifyContent: 'space-between' } },
+                h('span', null, '· ' + d),
+                h('button', { style: { ...s.btn, padding: '1px 8px', fontSize: 11 }, onClick: () => convoAction('removeDm', d) }, '移除')
+              ))
+            ),
+            h('div', { style: { fontWeight: 600, marginTop: 6 } }, '群聊（要你确认才加）'),
+            h('div', { style: s.row },
+              h('input', { style: s.input, value: newGroup, placeholder: '群名（和抖音上一致）', onChange: (e) => setNewGroup(e.target.value) }),
+              h('button', { style: s.btn, disabled: !newGroup.trim(), onClick: () => convoAction('requestGroup', newGroup.trim()) }, '申请加入')
+            ),
+            ((convos && convos.pendingGroups) || []).length
+              ? h('div', null,
+                h('div', { style: { opacity: 0.7 } }, '待你确认：'),
+                (convos.pendingGroups || []).map((g) => h('div', { key: 'pg' + g, style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } },
+                  h('span', null, '· ' + g),
+                  h('span', null,
+                    h('button', { style: { ...s.btn, padding: '1px 8px', fontSize: 11, marginRight: 6 }, onClick: () => convoAction('confirmGroup', g) }, '确认'),
+                    h('button', { style: { ...s.btn, padding: '1px 8px', fontSize: 11 }, onClick: () => convoAction('rejectGroup', g) }, '拒绝')
+                  )
+                ))
+              )
+              : null,
+            h('div', { style: { opacity: 0.75 } },
+              ((convos && convos.groups) || []).map((g) => {
+                const name = typeof g === 'string' ? g : (g && g.name) || ''
+                return h('div', { key: 'g' + name, style: { display: 'flex', justifyContent: 'space-between' } },
+                  h('span', null, '· ' + name),
+                  h('button', { style: { ...s.btn, padding: '1px 8px', fontSize: 11 }, onClick: () => convoAction('removeGroup', name) }, '移除')
+                )
+              })
+            )
+          )
+          : null,
         h('div', { ref: listRef, style: s.list },
           msgs.length
             ? msgs.map((m, i) => h('div', { key: i, style: s.msg },
@@ -212,7 +279,7 @@ window.__ModuleLoader__.load({
       return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 12, paddingTop: 8 } },
         h('div', { style: { fontSize: 13 } }, '随机分享给私聊'),
         h('div', { style: { opacity: 0.65, fontSize: 12, lineHeight: 1.8 } },
-          '点一下：随机挑一条视频，以卡片发给 ' + (target ? '主人（' + target + '）' : '（还没配私聊对象）') + '。',
+          '点一下：随机挑一条视频，以卡片发给 ' + (target ? '对方（' + target + '）' : '（还没配私聊对象）') + '。',
           h('br'),
           '群聊一律不发；每轮推荐也会自动发卡片，这里只是手动补一条。'
         ),
@@ -697,6 +764,7 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = useState('')
       const [msg, setMsg] = useState('')
       const [vp, setVp] = useState({ keywords: '', channels: '', authors: '', avoid: '', perDay: 10 })
+      const [owner, setOwner] = useState({ nick: '', douyinId: '', qq: '', alias: '对方' })
 
       const load = useCallback(async () => {
         try {
@@ -704,6 +772,8 @@ window.__ModuleLoader__.load({
           setData(d)
           setPersona((d.local && d.local.persona) || '')
           setMemory((d.local && d.local.memory) || '')
+          const o = d.owner || {}
+          setOwner({ nick: o.nick || '', douyinId: o.douyinId || '', qq: o.qq || '', alias: o.alias || '对方' })
           const v = d.videoPrefs || {}
           setVp({
             keywords: (v.keywords || []).join('\n'),
@@ -794,11 +864,37 @@ window.__ModuleLoader__.load({
         ),
 
         h('div', { style: { borderTop: '1px solid rgba(128,128,128,.18)', paddingTop: 8, display: 'flex', flexDirection: 'column', gap: 6 } },
+          h('div', { style: { fontSize: 13, fontWeight: 600 } }, '对方信息'),
+          h('div', { style: { opacity: 0.6, fontSize: 12 } }, '抖音昵称和抖音号用来认人、@ 你；QQ 号只在需要时报给管理员'),
+          (() => {
+            const f = (key, label, ph) => h('div', { key, style: { display: 'flex', alignItems: 'center', gap: 8 } },
+              h('span', { style: { fontSize: 12, opacity: 0.75, width: 64 } }, label),
+              h('input', {
+                value: owner[key],
+                placeholder: ph,
+                onChange: (e) => setOwner({ ...owner, [key]: e.target.value }),
+                style: {
+                  flex: 1, padding: '4px 8px', borderRadius: 8, fontSize: 12,
+                  border: '1px solid var(--dsh-border, rgba(128,128,128,.35))',
+                  background: 'transparent', color: 'inherit',
+                },
+              })
+            )
+            return [
+              f('nick', '抖音昵称', '比如 对方昵称'),
+              f('douyinId', '抖音号', '比如 xiaoyu_2026'),
+              f('qq', 'QQ 号', '可留空'),
+              f('alias', '称呼', '默认「对方」'),
+            ]
+          })()
+        ),
+
+        h('div', { style: { borderTop: '1px solid rgba(128,128,128,.18)', paddingTop: 8, display: 'flex', flexDirection: 'column', gap: 6 } },
           h('div', { style: { fontSize: 13, fontWeight: 600 } }, '刷视频的偏好'),
           h('div', { style: { opacity: 0.6, fontSize: 12 } }, '一行一个。想看的加分（关键词 > 分类），屏蔽词直接压到底。'),
           field('keywords', '想看的（关键词）', '比如：我的世界'),
           field('channels', '分类', '比如：游戏'),
-          field('authors', '指定作者', '比如：Sora'),
+          field('authors', '指定作者', '比如：某个博主昵称'),
           field('avoid', '不想看的（屏蔽词）', '比如：带货'),
           h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
             h('span', { style: { fontSize: 12, opacity: 0.75 } }, '每天最多推荐'),
@@ -820,14 +916,14 @@ window.__ModuleLoader__.load({
           h('textarea', {
             value: persona, disabled: !editable,
             onChange: (e) => setPersona(e.target.value),
-            placeholder: '比如：说话短一点，别端着；群里叫主人，私聊可以随便点……',
+            placeholder: '比如：说话短一点，别端着；群里正经点，私聊可以随便点……',
             style: { ...ta, minHeight: 120 },
           }),
           h('div', { style: { fontSize: 13 } }, '自己的记忆（额外的事实，会拼在共享记忆后面）'),
           h('textarea', {
             value: memory, disabled: !editable,
             onChange: (e) => setMemory(e.target.value),
-            placeholder: '比如：主人喜欢被叫宝宝；群里不能叫宝宝……',
+            placeholder: '比如：对方喜欢被叫昵称；群里不要用亲昵称呼……',
             style: { ...ta, minHeight: 100 },
           })
         ),
@@ -836,6 +932,7 @@ window.__ModuleLoader__.load({
           h('button', {
             style: s.primary, disabled: Boolean(busy),
             onClick: () => save({
+              owner,
               persona, memory,
               videoPrefs: {
                 keywords: vp.keywords.split('\n').map((x) => x.trim()).filter(Boolean),
@@ -988,7 +1085,7 @@ window.__ModuleLoader__.load({
                   ))
                   : h('div', { style: s.muted }, '还没有配置')
               ),
-              h(ChatPane, { target: target && target.name, kind: target && target.kind })
+              h(ChatPane, { target: target && target.name, kind: target && target.kind, onConvoChanged: loadStatus })
             )
       )
     }

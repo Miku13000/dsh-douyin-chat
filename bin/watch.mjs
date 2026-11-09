@@ -1,4 +1,4 @@
-﻿/**
+/**
  * bin/watch.mjs —— 监听循环：「被 @ 就必须回」，支持多个群、可选参与方式。
  *
  * 2026-11-09 两处修正（实测踩出来的）：
@@ -26,10 +26,10 @@ import { load as loadPrefs } from '../lib/prefs.mjs'
 const arg = (n, d = '') => { const i = process.argv.indexOf(n); return i < 0 ? d : (process.argv[i + 1] ?? d) }
 const has = (f) => process.argv.includes(f)
 const INTERVAL = Math.max(4, Number(arg('--interval', '6')) || 6)
-const MAX_REPLY = Math.max(1, Number(arg('--max', '2')) || 2)
+const MAX_REPLY = Math.max(1, Number(arg('--max', '1')) || 1)
 const ONCE = has('--once') || has('--dry')
 const DRY = has('--dry')
-const SELF = selfNick() || '小鲸鱼deepseek'
+const SELF = selfNick() || process.env.FISH_SELF_NICK || '小鲸鱼'
 const COOKIE = cookieFile()
 const STATE = join(PATHS.home, 'watch-state.json')
 const LOG = join(PATHS.home, 'watch.log')
@@ -104,6 +104,7 @@ async function main() {
     if (fresh.length) { watchList.length = 0; watchList.push(...fresh) }
   } catch (e) { log('群名同步跳过：' + String(e?.message ?? e)) }
 
+  let currentConv = ''   // 当前浏览器里开着哪个会话（按名字判，别靠"有没有输入框"）
     for (;;) {
       ticks += 1
       if (ticks % 5 === 0) await openChat(b)
@@ -117,7 +118,16 @@ async function main() {
         const st = (state[g] = state[g] || { anchor: '', replied: 0, lastReplyAt: 0 })
         try {
           // 已经开在这个群就不重复点开（点开一次要 1~2 秒）
-          if (!(await hasEditor(b))) { await openConversation(b, g); await sleep(600) }
+          if (true) {   // 每轮都切：靠 currentConv 猜会读到别的群
+            currentConv = ''
+            const conv = await openConversation(b, g)
+            if (!conv || conv.ok === false) {
+              log(`[${g}] 打不开这个会话（可能不在会话列表里），本轮跳过`)
+              continue
+            }
+            currentConv = g
+            await sleep(600)
+          }
           let msgs = await readRecent(b, 15)
       try { if (Array.isArray(msgs) && msgs.length) recordTraffic(msgs.length) } catch { /* 统计失败不影响监听 */ }
           for (let tryI = 0; tryI < 3 && !msgs.length; tryI++) {
@@ -128,17 +138,24 @@ async function main() {
           }
           if (!msgs.length) { log(`[${g}] 第 ${ticks} 轮：读不到消息（重试 3 次仍空）`); continue }
 
-          const newest = sig(msgs[msgs.length - 1])
+          // 锚点只取「最后一条别人说的话」：自己的消息不能当锚点，否则永远判定无新消息
+          const isMineMsg = (m) => m.who === SELF || m.who === '__self__' || String(m.who || '').includes('小鲸鱼')
+          const mineOrEmpty = msgs.filter((m) => !isMineMsg(m))
+          const newest = mineOrEmpty.length ? sig(mineOrEmpty[mineOrEmpty.length - 1]) : sig(msgs[msgs.length - 1])
           if (!st.anchor) {
-            st.anchor = newest
+            // 首次接上：锚点设在「倒数第二条别人说的话」，让最后一条（可能是 @ 我们的）当新消息处理
+            const nonSelfMsgs = msgs.filter((m) => m.who !== SELF && m.who !== '__self__' && !String(m.who || '').includes('小鲸鱼'))
+            const anchorMsg = nonSelfMsgs.length > 1 ? nonSelfMsgs[nonSelfMsgs.length - 2] : null
+            st.anchor = anchorMsg ? sig(anchorMsg) : ''
             saveState(state)
             log(`[${g}] 首次接上，锚点 = ${newest.slice(0, 40)}`)
-            continue
+            if (!st.anchor) { st.anchor = newest; saveState(state); continue }
           }
           if (newest === st.anchor) { log(`[${g}] 第 ${ticks} 轮：无新消息`); continue }
 
           const idx = msgs.map(sig).lastIndexOf(st.anchor)
-          const fresh = idx >= 0 ? msgs.slice(idx + 1) : msgs.slice(-6)
+          const freshAll = idx >= 0 ? msgs.slice(idx + 1) : msgs.slice(-6)
+          const fresh = freshAll.filter((m) => !isMineMsg(m))
           const mode = prefs.participation || 'mention'
           // 有些消息行不带发送者名（同一人连发时省略），回溯最近的具名消息补上，不然 @ 就丢了
           const whoOf = (m) => {
@@ -172,6 +189,14 @@ async function main() {
           saveState(state)
 
           for (const t of picked) {
+            // ⭐ 省钱：同样的触发消息 30 分钟内不再调模型（避免"生成完再丢掉"白花 token）
+            const trigSig = `${String(t.who || '')}|${String(t.text || '').slice(0, 60)}`
+            const recentTrig = Array.isArray(state.recentTriggers) ? state.recentTriggers : []
+            const seen = recentTrig.find((x) => x && x.sig === trigSig && Date.now() - x.at < 1_800_000)
+            if (seen) { log(`[${g}] 这条消息刚回过了（${Math.round((Date.now() - seen.at) / 60000)} 分钟前），跳过省 token`); continue }
+            // 超短消息（一个表情、一个字）且没点名 → 不值得花 token 生成
+            const tinyMsg = String(t.text || '').trim().replace(/[\\s\\p{P}\\p{S}]/gu, '').length <= 2
+            if (tinyMsg && !isNamed(t)) { log(`[${g}] 超短消息（${t.text}），跳过省 token`); continue }
             const draft = await draftReply({ who: t.who, text: t.text, context: msgs.slice(-6), kind: 'group' })
             // ⭐ 群聊 → 私聊：群里有人明确要私信，就去发一条私信（只对已有会话的人）
             const wantsDm = /私聊|私信|发给我|单独发/.test(String(t.text || ''))
@@ -188,12 +213,61 @@ async function main() {
             if (DRY) { log(`[dry][${g}] 会回给 ${t.who}：${draft.text}${wantsDm ? '（并尝试私信）' : ''}`); continue }
             const text = dmResult?.sent ? '私信发了，收一下。' : draft.text
             // 群里一律不 @：像 QQ 那样正常说话，别每句都戳人
-            const atWho = ''
+            // @ 谁：默认不 @；但使用者说「@一下 / 随便@ / 艾特一下」时，真 @ 一个
+            let atWho = ''
+            const askText = String(t.text || '')
+            const wantsAt = /@|艾特/.test(askText) && /(一下|随便|个|谁|挑)/.test(askText)
+            if (wantsAt) {
+              const named = askText.match(/[@艾特]+\s*([\u4e00-\u9fa5A-Za-z0-9_]{2,12})/)
+              const rawName = named && named[1] ? named[1] : ''
+              // 消息里的 @ 很可能是 @ 我们自己的，别把自己当目标
+              const isSelfName = rawName && (/小鲸鱼|小满|鱼鱼/.test(rawName) || rawName === String(SELF || '') || rawName.includes('deepseek'))
+              const fromMsg = rawName && !isSelfName && !/一下|随便|谁|个|人/.test(rawName) ? rawName : ''
+              if (fromMsg) {
+                atWho = fromMsg
+              } else {
+                const selfName = String(SELF || '小鲸鱼deepseek')
+                const speakers = [...new Set(fresh.map((m) => whoOf(m)).map((w) => String(w || '').trim()).filter((w) => w && w !== selfName && w !== '__self__' && w !== '__peer__' && !w.includes('小鲸鱼')))]
+                // 自己挑：优先挑「不是正在说话的那个人」，别每回都 @ 使用者
+                const others = speakers.filter((w) => w !== String(t.who || '').trim())
+                const pool = others.length ? others : speakers
+                if (pool.length) atWho = pool[Math.floor(Math.random() * pool.length)]
+              }
+              log(`[${g}] 使用者要求 @ 人 → 选 ${atWho || '(没找到可 @ 的对象)'}`)
+            }
+            // 同群 60 秒内最多回一条（防止一次读多行时连发；被点名的不拦）
+            const namedHere = isNamed(t)
+            if (!namedHere && Date.now() - (st.lastReplyAt || 0) < 60_000) {
+              log(`[${g}] 60 秒内刚回过，这条先不回`)
+              continue
+            }
             const safeText = sanitize(draft.text, 'group')
+            // 同一句话 5 分钟内别重复说（去掉标点/表情后比较）
+            const normText = (t2) => String(t2 || '').replace(/[\s\p{P}\p{S}]/gu, '')
+            const safeNorm = normText(safeText)
+            if (state.lastNorm && state.lastNorm === safeNorm && Date.now() - (state.lastNormAt || 0) < 1_800_000) {
+              log(`[${g}] 这句话刚说过，跳过`)
+              continue
+            }
             let sent = await sendInPlace(b, { text: safeText, at: atWho })
-            if (!sent.ok) sent = await sendMessage(b, { to: g, text, at: atWho })
+            if (!sent.ok && atWho) {
+              // @ 不成功 → 退一步：先把编辑框清干净，再不带 @ 发一次（避免重复发）
+              log(`[${g}] @${atWho} 没成功（${sent.error || '原因不明'}），清空后改成不 @ 发`)
+              try {
+                await b.eval(`(() => { const ed = [...document.querySelectorAll('div[contenteditable="true"]')].find((e) => /messageEditor/.test(e.className || '')); if (ed) { ed.focus(); document.execCommand('selectAll'); document.execCommand('delete') } return true })()`)
+              } catch { /* 清不掉就算了 */ }
+              await sleep(400)
+              sent = await sendInPlace(b, { text: safeText })
+            }
+            if (!sent.ok) sent = await sendMessage(b, { to: g, text, at: '' })
             log(`[${g}] 回 ${t.who}：${text} → sent=${sent.sent} appeared=${sent.appeared}${sent.error ? ' error=' + sent.error : ''}`)
             if (sent.ok) { st.replied += 1; st.lastReplyAt = Date.now(); if (t.unsolicited) st.lastUnsolicited = Date.now() }
+            state.recentTriggers = (Array.isArray(state.recentTriggers) ? state.recentTriggers : [])
+              .concat([{ sig: trigSig, at: Date.now() }])
+              .filter((x) => x && Date.now() - x.at < 1_800_000)
+              .slice(-30)
+            state.lastNorm = normText(safeText)
+            state.lastNormAt = Date.now()
             await sleep(2500)
           }
           saveState(state)

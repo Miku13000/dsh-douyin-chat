@@ -18,6 +18,7 @@ import { openChat, openConversation, openConversationWithId, listConversations, 
 import { normalize as normalizeGroups, names as groupNames } from '../lib/groups.mjs'
 import { save as savePrefs } from '../lib/prefs.mjs'
 import { draftReply, sanitize } from '../lib/reply.mjs'
+import { fingerprint as fpOf, pickFresh, rememberSeen, isSelfMessage } from '../lib/messages.mjs'
 import { speechLevel } from '../lib/valley.mjs'
 import { record as recordTraffic, phase as trafficPhase } from '../lib/traffic.mjs'
 import { ensureHome, PATHS } from '../lib/paths.mjs'
@@ -29,7 +30,7 @@ const INTERVAL = Math.max(4, Number(arg('--interval', '6')) || 6)
 const MAX_REPLY = Math.max(1, Number(arg('--max', '1')) || 1)
 const ONCE = has('--once') || has('--dry')
 const DRY = has('--dry')
-const SELF = selfNick() || process.env.FISH_SELF_NICK || '小鲸鱼'
+const SELF = selfNick() || '小鲸鱼'
 const COOKIE = cookieFile()
 const STATE = join(PATHS.home, 'watch-state.json')
 const LOG = join(PATHS.home, 'watch.log')
@@ -138,24 +139,24 @@ async function main() {
           }
           if (!msgs.length) { log(`[${g}] 第 ${ticks} 轮：读不到消息（重试 3 次仍空）`); continue }
 
-          // 锚点只取「最后一条别人说的话」：自己的消息不能当锚点，否则永远判定无新消息
-          const isMineMsg = (m) => m.who === SELF || m.who === '__self__' || String(m.who || '').includes('小鲸鱼')
-          const mineOrEmpty = msgs.filter((m) => !isMineMsg(m))
-          const newest = mineOrEmpty.length ? sig(mineOrEmpty[mineOrEmpty.length - 1]) : sig(msgs[msgs.length - 1])
-          if (!st.anchor) {
-            // 首次接上：锚点设在「倒数第二条别人说的话」，让最后一条（可能是 @ 我们的）当新消息处理
-            const nonSelfMsgs = msgs.filter((m) => m.who !== SELF && m.who !== '__self__' && !String(m.who || '').includes('小鲸鱼'))
-            const anchorMsg = nonSelfMsgs.length > 1 ? nonSelfMsgs[nonSelfMsgs.length - 2] : null
-            st.anchor = anchorMsg ? sig(anchorMsg) : ''
+          // ⭐ 指纹表代替锚点：抖音 DOM 消息没有 id，用「发送者+正文」当指纹
+          const isMineMsg = (m) => isSelfMessage(m, SELF)
+          
+          if (!st.seen) {
+            // 首次接上：把当前消息全部记入，避免一上来回一堆
+            const m0 = new Map()
+            st.seen = rememberSeen(msgs, m0)
             saveState(state)
-            log(`[${g}] 首次接上，锚点 = ${newest.slice(0, 40)}`)
-            if (!st.anchor) { st.anchor = newest; saveState(state); continue }
+            log(`[${g}] 首次接上，已记录 ${st.seen.length} 条`)
+            continue
           }
-          if (newest === st.anchor) { log(`[${g}] 第 ${ticks} 轮：无新消息`); continue }
-
-          const idx = msgs.map(sig).lastIndexOf(st.anchor)
-          const freshAll = idx >= 0 ? msgs.slice(idx + 1) : msgs.slice(-6)
+          
+          const { fresh: freshAll, map: seenMap } = pickFresh(msgs, st.seen)
           const fresh = freshAll.filter((m) => !isMineMsg(m))
+          // 记录本轮所有消息（含自己的）
+          st.seen = rememberSeen(msgs, seenMap)
+          saveState(state)
+          if (!fresh.length) { log(`[${g}] 第 ${ticks} 轮：无新消息`); continue }
           const mode = prefs.participation || 'mention'
           // 有些消息行不带发送者名（同一人连发时省略），回溯最近的具名消息补上，不然 @ 就丢了
           const whoOf = (m) => {
@@ -185,8 +186,6 @@ async function main() {
           }
           const picked = targets.slice(-(reduced ? 1 : MAX_REPLY))
           log(`[${g}] 新增 ${fresh.length} 条，其中要回的 ${picked.length} 条`)
-          st.anchor = newest
-          saveState(state)
 
           for (const t of picked) {
             // ⭐ 省钱：同样的触发消息 30 分钟内不再调模型（避免"生成完再丢掉"白花 token）
@@ -226,7 +225,7 @@ async function main() {
               if (fromMsg) {
                 atWho = fromMsg
               } else {
-                const selfName = String(SELF || '小鲸鱼deepseek')
+                const selfName = String(SELF || '小鲸鱼')
                 const speakers = [...new Set(fresh.map((m) => whoOf(m)).map((w) => String(w || '').trim()).filter((w) => w && w !== selfName && w !== '__self__' && w !== '__peer__' && !w.includes('小鲸鱼')))]
                 // 自己挑：优先挑「不是正在说话的那个人」，别每回都 @ 使用者
                 const others = speakers.filter((w) => w !== String(t.who || '').trim())
@@ -249,6 +248,12 @@ async function main() {
               log(`[${g}] 这句话刚说过，跳过`)
               continue
             }
+            // ③ 发送前回读：最近几条里已经有这句就不再发（幂等）
+            try {
+              const recent = await readRecent(b, 3)
+              if (recent.some((m2) => normText(m2.text) === safeNorm)) { log(`[${g}] 回读发现这句已发过，跳过`); continue }
+            } catch { /* 读失败照发 */ }
+
             let sent = await sendInPlace(b, { text: safeText, at: atWho })
             if (!sent.ok && atWho) {
               // @ 不成功 → 退一步：先把编辑框清干净，再不带 @ 发一次（避免重复发）

@@ -1,6 +1,6 @@
 {
   "name": "dsh-douyin-chat",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "抖音群聊聊天 —— DSH 插件：群聊/私信自动回话、表情包、随机分享（仅私聊）",
   "type": "module",
   "main": "index.js",

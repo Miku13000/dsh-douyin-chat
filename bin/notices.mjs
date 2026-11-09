@@ -4,9 +4,7 @@
  *   node bin/notices.mjs                 # 摘要 + 命中的条目
  *   node bin/notices.mjs --all           # 连原始通知一起给
  *
- * 依赖 lib/notices.mjs（通过本机已配置的 MCP 桥接读取通知；没配就返回空）。
- *
- * 需要环境变量：DOUYIN_MCP_SERVER 指向任意提供 douyin_notices 工具的 MCP server。
+ * 依赖 lib/notices.mjs（走「刷抖音」插件的 MCP 服务拿签名接口结果）。
  */
 import { fetchNotices, pickMentions } from '../lib/notices.mjs'
 import { flag, emit } from '../lib/util.mjs'

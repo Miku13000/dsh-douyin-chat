@@ -1,4 +1,4 @@
-﻿/**
+/**
  * bin/service.mjs —— 抖音后台服务（对标 QQ 桥接的 3100）
  *
  * 设计原则（使用者 2026-11-09 定）：**不操作电脑**。
@@ -34,6 +34,8 @@ import { soulStatus, localPersona, localMemory, saveLocalPersona, saveLocalMemor
 import { Browser, readCookieString } from '../lib/cdp.mjs'
 import { openChat, openConversation, readRecent } from '../lib/douyin.mjs'
 import { cookieFile } from '../lib/account.mjs'
+import { postComment } from '../lib/comment-post.mjs'
+import { replyComment } from '../lib/comment-reply.mjs'
 
 // ---- 常驻浏览器（开关：prefs.keepBrowser）----
 let warm = null
@@ -474,6 +476,8 @@ const server = createServer(async (req, res) => {
       const name = String(b.name || '').trim()
       const text = String(b.text || '').trim()
       if (!aweme || !name) return json(res, 400, { ok: false, error: '缺 aweme 或 name' })
+      // 编码坏掉的中文会变成一连串问号，宁可拒绝也别发出去
+      if (/\?{3,}/.test(text)) return json(res, 400, { ok: false, error: '正文出现连续问号（编码坏了），已拒绝发布' })
       if (b.dry !== true && b.confirm !== true) {
         return json(res, 200, { ok: true, sent: false, needsConfirm: true, draft: '@' + name + ' ' + text })
       }
@@ -482,11 +486,24 @@ const server = createServer(async (req, res) => {
         if (!g.ok) return json(res, 200, { ok: false, error: '先别发：' + g.reason, guard: g })
         await new Promise((r2) => setTimeout(r2, jitterMs()))
       }
-      const args = ['bin/comment-mention-bridge.mjs', '--aweme', aweme, '--name', name, '--text', text]
-      if (b.dry === true) args.push('--dry')
-      const r = await runBin(args[0], args.slice(1), { timeout: 300_000 })
-      if (r && r.ok) { try { bumpStat('comment'); guardMark('comment') } catch { /* 忽略 */ } }
-      return json(res, 200, r)
+      // 走自己的实现：昵称必须完全一致且唯一，做不到就不发（宁可不发，也不 @ 错人）
+      try {
+        const browser = warm || await new Browser().launch({ headless: true })
+        await browser.setCookies(readCookieString(cookieFile()))
+        const r = await postComment(browser, {
+          awemeId: aweme,
+          url: 'https://www.douyin.com/video/' + aweme,
+          text,
+          at: name,
+          atId: (loadPrefs().owner && loadPrefs().owner.douyinId) || '',
+          dry: b.dry === true,
+        })
+        if (!warm) { try { await browser.close() } catch { /* 忽略 */ } }
+        if (r && r.ok) { try { bumpStat('comment'); guardMark('comment') } catch { /* 忽略 */ } }
+        return json(res, 200, r)
+      } catch (e) {
+        return json(res, 200, { ok: false, error: '评论失败：' + String(e?.message ?? e) })
+      }
     }    if (p === '/convos') {
       const prefsNow = loadPrefs()
       const dm = Array.isArray(prefsNow.dmPeers) ? prefsNow.dmPeers.slice() : []
@@ -766,9 +783,23 @@ const server = createServer(async (req, res) => {
     if (p === '/comment/reply' && req.method === 'POST') {
       const b = await body(req)
       if (!b.url || !b.text) return json(res, 400, { ok: false, error: '缺 url 或 text' })
-      const r = await runBin('bin/comments.mjs', ['reply', '--url', String(b.url), '--index', String(Number(b.index) || 0), '--text', String(b.text)])
-      if (r && r.ok) { try { bumpStat('comment') } catch { /* 忽略 */ } }
-      return json(res, 200, r)
+      if (/\?{3,}/.test(String(b.text))) return json(res, 400, { ok: false, error: '正文出现连续问号（编码坏了），已拒绝' })
+      try {
+        const browser = warm || await new Browser().launch({ headless: true })
+        await browser.setCookies(readCookieString(cookieFile()))
+        const r = await replyComment(browser, {
+          url: String(b.url),
+          index: Number(b.index) || 0,
+          match: String(b.match || ''),
+          text: String(b.text),
+          dry: b.dry === true,
+        })
+        if (!warm) { try { await browser.close() } catch { /* 忽略 */ } }
+        if (r && r.ok) { try { bumpStat('comment'); guardMark('comment') } catch { /* 忽略 */ } }
+        return json(res, 200, r)
+      } catch (e) {
+        return json(res, 200, { ok: false, error: '回复失败：' + String(e?.message ?? e) })
+      }
     }
     if (p === '/share' && req.method === 'POST') {
       const b = await body(req)
@@ -847,6 +878,22 @@ const server = createServer(async (req, res) => {
           ...(b.cleanup.hour !== undefined ? { hour: Math.max(0, Math.min(23, Number(b.cleanup.hour) || 0)) } : {}),
         }
       }
+      // ⭐ 限速可自定义：每天最多几条、两条之间至少隔几分钟
+      if (b.guard && typeof b.guard === 'object') {
+        const clamp = (v, lo, hi, dflt) => {
+          const n2 = Number(v)
+          if (!Number.isFinite(n2)) return dflt
+          return Math.max(lo, Math.min(hi, Math.round(n2)))
+        }
+        const g0 = prefs.guard || {}
+        patch.guard = {
+          ...g0,
+          ...(b.guard.commentPerDay !== undefined ? { commentPerDay: clamp(b.guard.commentPerDay, 0, 50, g0.commentPerDay ?? 3) } : {}),
+          ...(b.guard.commentGapMin !== undefined ? { commentGapMin: clamp(b.guard.commentGapMin, 0, 1440, g0.commentGapMin ?? 45) } : {}),
+          ...(b.guard.sharePerDay !== undefined ? { sharePerDay: clamp(b.guard.sharePerDay, 0, 200, g0.sharePerDay ?? 10) } : {}),
+          ...(b.guard.shareGapMin !== undefined ? { shareGapMin: clamp(b.guard.shareGapMin, 0, 1440, g0.shareGapMin ?? 10) } : {}),
+        }
+      }
       if (typeof b.keepBrowser === 'boolean') {
         patch.keepBrowser = b.keepBrowser
         if (!b.keepBrowser) await closeWarm()
@@ -864,6 +911,7 @@ const server = createServer(async (req, res) => {
         cleanup: saved.cleanup || null,
         peakAvoid: saved.peakAvoid || null,
         valley: saved.valley || null,
+        guard: saved.guard || null,
         warmRunning: Boolean(warm),
         watch: Boolean(watchChild),
         watchDm: Boolean(watchDmChild),

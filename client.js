@@ -279,7 +279,7 @@ window.__ModuleLoader__.load({
       return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 12, paddingTop: 8 } },
         h('div', { style: { fontSize: 13 } }, '随机分享给私聊'),
         h('div', { style: { opacity: 0.65, fontSize: 12, lineHeight: 1.8 } },
-          '点一下：随机挑一条视频，以卡片发给 ' + (target ? '对方（' + target + '）' : '（还没配私聊对象）') + '。',
+          '点一下：随机挑一条视频，以卡片发给 ' + (target ? '主人（' + target + '）' : '（还没配私聊对象）') + '。',
           h('br'),
           '群聊一律不发；每轮推荐也会自动发卡片，这里只是手动补一条。'
         ),
@@ -664,6 +664,36 @@ window.__ModuleLoader__.load({
             h('span', { style: { opacity: 0.6 } }, '（这一小时 ' + t.todayCount + ' 条' + (t.nextIdle ? '，下一空闲 ' + t.nextIdle : '') + '）')
           )
         })(),
+        // ⭐ 限速（可自定义）
+        h('div', { style: { borderTop: '1px solid rgba(128,128,128,.18)', marginTop: 8, paddingTop: 8 } },
+          h('div', { style: { fontSize: 13, marginBottom: 4 } }, '限速（自己定）'),
+          (() => {
+            const g = (st.guard && st.guard.config) || {}
+            const num = (key, label, unit, dflt, lo, hi) => h('div', { key, style: srow2 },
+              h('div', { style: { fontSize: 13 } }, label),
+              h('div', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
+                h('input', {
+                  type: 'number', min: lo, max: hi, defaultValue: String(g[key] ?? dflt),
+                  disabled: busy === 'guard_' + key,
+                  style: { width: 72, padding: '3px 8px', borderRadius: 8, fontSize: 12, border: '1px solid var(--dsh-border, rgba(128,128,128,.35))', background: 'var(--dsh-surface, #1b1b1f)', color: 'inherit' },
+                  onBlur: (e) => {
+                    const v = Number(e.target.value)
+                    if (!Number.isFinite(v)) return
+                    put({ guard: { [key]: Math.max(lo, Math.min(hi, Math.round(v))) } }, 'guard_' + key)
+                  },
+                }),
+                h('span', { style: { fontSize: 12, opacity: 0.7 } }, unit)
+              )
+            )
+            return h('div', {},
+              num('commentPerDay', '每天最多评论', '条（0 = 不发）', 3, 0, 50),
+              num('commentGapMin', '两条评论间隔', '分钟', 45, 0, 1440),
+              num('sharePerDay', '每天最多分享', '条', 10, 0, 200),
+              num('shareGapMin', '两次分享间隔', '分钟', 10, 0, 1440),
+              h('div', { style: { fontSize: 11, opacity: 0.55, marginTop: 2 } }, '改完离开输入框就生效，不用重启')
+            )
+          })()
+        ),
         h('div', { style: { borderTop: '1px solid rgba(128,128,128,.18)', marginTop: 8, paddingTop: 8 } },
           h(Toggle, {
             label: '每天自动清理缓存',
@@ -764,7 +794,7 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = useState('')
       const [msg, setMsg] = useState('')
       const [vp, setVp] = useState({ keywords: '', channels: '', authors: '', avoid: '', perDay: 10 })
-      const [owner, setOwner] = useState({ nick: '', douyinId: '', qq: '', alias: '对方' })
+      const [owner, setOwner] = useState({ nick: '', douyinId: '', qq: '', alias: '主人' })
 
       const load = useCallback(async () => {
         try {
@@ -773,7 +803,7 @@ window.__ModuleLoader__.load({
           setPersona((d.local && d.local.persona) || '')
           setMemory((d.local && d.local.memory) || '')
           const o = d.owner || {}
-          setOwner({ nick: o.nick || '', douyinId: o.douyinId || '', qq: o.qq || '', alias: o.alias || '对方' })
+          setOwner({ nick: o.nick || '', douyinId: o.douyinId || '', qq: o.qq || '', alias: o.alias || '主人' })
           const v = d.videoPrefs || {}
           setVp({
             keywords: (v.keywords || []).join('\n'),
@@ -864,7 +894,7 @@ window.__ModuleLoader__.load({
         ),
 
         h('div', { style: { borderTop: '1px solid rgba(128,128,128,.18)', paddingTop: 8, display: 'flex', flexDirection: 'column', gap: 6 } },
-          h('div', { style: { fontSize: 13, fontWeight: 600 } }, '对方信息'),
+          h('div', { style: { fontSize: 13, fontWeight: 600 } }, '主人信息'),
           h('div', { style: { opacity: 0.6, fontSize: 12 } }, '抖音昵称和抖音号用来认人、@ 你；QQ 号只在需要时报给管理员'),
           (() => {
             const f = (key, label, ph) => h('div', { key, style: { display: 'flex', alignItems: 'center', gap: 8 } },
@@ -881,10 +911,10 @@ window.__ModuleLoader__.load({
               })
             )
             return [
-              f('nick', '抖音昵称', '比如 对方昵称'),
+              f('nick', '抖音昵称', '比如 Sora'),
               f('douyinId', '抖音号', '比如 xiaoyu_2026'),
               f('qq', 'QQ 号', '可留空'),
-              f('alias', '称呼', '默认「对方」'),
+              f('alias', '对外称呼', '默认「主人」'),
             ]
           })()
         ),
@@ -894,7 +924,7 @@ window.__ModuleLoader__.load({
           h('div', { style: { opacity: 0.6, fontSize: 12 } }, '一行一个。想看的加分（关键词 > 分类），屏蔽词直接压到底。'),
           field('keywords', '想看的（关键词）', '比如：我的世界'),
           field('channels', '分类', '比如：游戏'),
-          field('authors', '指定作者', '比如：某个博主昵称'),
+          field('authors', '指定作者', '比如：Sora'),
           field('avoid', '不想看的（屏蔽词）', '比如：带货'),
           h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
             h('span', { style: { fontSize: 12, opacity: 0.75 } }, '每天最多推荐'),
@@ -916,14 +946,14 @@ window.__ModuleLoader__.load({
           h('textarea', {
             value: persona, disabled: !editable,
             onChange: (e) => setPersona(e.target.value),
-            placeholder: '比如：说话短一点，别端着；群里正经点，私聊可以随便点……',
+            placeholder: '比如：说话短一点，别端着；群里叫主人，私聊可以随便点……',
             style: { ...ta, minHeight: 120 },
           }),
           h('div', { style: { fontSize: 13 } }, '自己的记忆（额外的事实，会拼在共享记忆后面）'),
           h('textarea', {
             value: memory, disabled: !editable,
             onChange: (e) => setMemory(e.target.value),
-            placeholder: '比如：对方喜欢被叫昵称；群里不要用亲昵称呼……',
+            placeholder: '比如：主人喜欢被叫昵称；群里不能叫昵称……',
             style: { ...ta, minHeight: 100 },
           })
         ),
